@@ -45,10 +45,10 @@ const (
 	// key "process_refresh_frequency", but exposing this type of implementation detail seems wrong now
 	minTimeBetweenSessionRefreshes = time.Second * 5
 
-	// determines whether the map should be refreshed when a slider moves.
+	// determines whether the map should be refreshed when a fader moves.
 	// this is a bit greedy but allows us to ensure sessions are always re-acquired, which is
 	// especially important for process groups (because you can have one ongoing session
-	// always preventing lookup of other processes bound to its slider, which forces the user
+	// always preventing lookup of other processes bound to its fader, which forces the user
 	// to manually refresh sessions). a cleaner way to do this down the line is by registering to notifications
 	// whenever a new session is added, but that's too hard to justify for how easy this solution is
 	maxTimeBetweenSessionRefreshes = time.Second * 45
@@ -80,7 +80,7 @@ func (m *sessionMap) initialize() error {
 	}
 
 	m.setupOnConfigReload()
-	m.setupOnSliderMove()
+	m.setupOnFaderMove()
 
 	return nil
 }
@@ -136,14 +136,14 @@ func (m *sessionMap) setupOnConfigReload() {
 	}()
 }
 
-func (m *sessionMap) setupOnSliderMove() {
-	sliderEventsChannel := m.deej.serial.SubscribeToSliderMoveEvents()
+func (m *sessionMap) setupOnFaderMove() {
+	faderEventsChannel := m.deej.serial.SubscribeToFaderMoveEvents()
 
 	go func() {
 		for {
 			select {
-			case event := <-sliderEventsChannel:
-				m.handleSliderMoveEvent(event)
+			case event := <-faderEventsChannel:
+				m.handleFaderMoveEvent(event)
 			}
 		}
 	}()
@@ -167,7 +167,7 @@ func (m *sessionMap) refreshSessions(force bool) {
 	}
 }
 
-// returns true if a session is not currently mapped to any slider, false otherwise
+// returns true if a session is not currently mapped to any fader, false otherwise
 // special sessions (master, system, mic) and device-specific sessions always count as mapped,
 // even when absent from the config. this makes sense for every current feature that uses "unmapped sessions"
 func (m *sessionMap) sessionMapped(session Session) bool {
@@ -185,7 +185,7 @@ func (m *sessionMap) sessionMapped(session Session) bool {
 	matchFound := false
 
 	// look through the actual mappings
-	m.deej.config.SliderMapping.iterate(func(sliderIdx int, targets []string) {
+	m.deej.config.faderMapping.iterate(func(faderIdx int, targets []string) {
 		for _, target := range targets {
 
 			// ignore special transforms
@@ -206,18 +206,18 @@ func (m *sessionMap) sessionMapped(session Session) bool {
 	return matchFound
 }
 
-func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
+func (m *sessionMap) handleFaderMoveEvent(event faderMoveEvent) {
 
 	// first of all, ensure our session map isn't moldy
 	if m.lastSessionRefresh.Add(maxTimeBetweenSessionRefreshes).Before(time.Now()) {
-		m.logger.Debug("Stale session map detected on slider move, refreshing")
+		m.logger.Debug("Stale session map detected on fader move, refreshing")
 		m.refreshSessions(true)
 	}
 
-	// get the targets mapped to this slider from the config
-	targets, ok := m.deej.config.SliderMapping.get(event.SliderID)
+	// get the targets mapped to this fader from the config
+	targets, ok := m.deej.config.faderMapping.get(event.faderID)
 
-	// if slider not found in config, silently ignore
+	// if fader not found in config, silently ignore
 	if !ok {
 		return
 	}
@@ -225,7 +225,7 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 	targetFound := false
 	adjustmentFailed := false
 
-	// for each possible target for this slider...
+	// for each possible target for this fader...
 	for _, target := range targets {
 
 		// resolve the target name by cleaning it up and applying any special transformations.
@@ -258,7 +258,7 @@ func (m *sessionMap) handleSliderMoveEvent(event SliderMoveEvent) {
 	}
 
 	// if we still haven't found a target or the volume adjustment failed, maybe look for the target again.
-	// processes could've opened since the last time this slider moved.
+	// processes could've opened since the last time this fader moved.
 	// if they haven't, the cooldown will take care to not spam it up
 	if !targetFound {
 		m.refreshSessions(false)

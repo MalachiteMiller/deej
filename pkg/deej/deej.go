@@ -18,7 +18,7 @@ const (
 	envNoTray = "DEEJ_NO_TRAY_ICON"
 )
 
-// Deej is the main entity managing access to all sub-components
+// Deej is the main entity managing access to all subcomponents
 type Deej struct {
 	logger   *zap.SugaredLogger
 	notifier Notifier
@@ -101,7 +101,7 @@ func (d *Deej) Initialize() error {
 	// decide whether to run with/without tray
 	if _, noTraySet := os.LookupEnv(envNoTray); noTraySet {
 
-		d.logger.Debugw("Running without tray icon", "reason", "envvar set")
+		d.logger.Debugw("Running without tray icon", "reason", "env-var set")
 
 		// run in main thread while waiting on ctrl+C
 		d.setupInterruptHandler()

@@ -16,16 +16,18 @@ import (
 // CanonicalConfig provides application-wide access to configuration fields,
 // as well as loading/file watching logic for deej's configuration file
 type CanonicalConfig struct {
-	SliderMapping *sliderMap
+	faderMapping *faderMap
 
 	ConnectionInfo struct {
 		COMPort  string
 		BaudRate int
 	}
 
-	InvertSliders bool
+	InvertFaders bool
 
 	NoiseReductionLevel string
+
+	NumPhysFaders int
 
 	logger             *zap.SugaredLogger
 	notifier           Notifier
@@ -48,21 +50,22 @@ const (
 
 	configType = "yaml"
 
-	configKeySliderMapping       = "slider_mapping"
-	configKeyInvertSliders       = "invert_sliders"
+	configKeyFaderMapping        = "fader_mapping"
+	configKeyInvertFaders        = "invert_faders"
 	configKeyCOMPort             = "com_port"
 	configKeyBaudRate            = "baud_rate"
 	configKeyNoiseReductionLevel = "noise_reduction"
+	configKeyNumPhysFaders       = "number_of_faders"
 
 	defaultCOMPort  = "COM4"
-	defaultBaudRate = 9600
+	defaultBaudRate = 115200
 )
 
 // has to be defined as a non-constant because we're using path.Join
 var internalConfigPath = path.Join(".", logDirectory)
 
-var defaultSliderMapping = func() *sliderMap {
-	emptyMap := newSliderMap()
+var defaultFaderMapping = func() *faderMap {
+	emptyMap := newFaderMap()
 	emptyMap.set(0, []string{masterSessionName})
 
 	return emptyMap
@@ -85,10 +88,11 @@ func NewConfig(logger *zap.SugaredLogger, notifier Notifier) (*CanonicalConfig, 
 	userConfig.SetConfigType(configType)
 	userConfig.AddConfigPath(userConfigPath)
 
-	userConfig.SetDefault(configKeySliderMapping, map[string][]string{})
-	userConfig.SetDefault(configKeyInvertSliders, false)
+	userConfig.SetDefault(configKeyFaderMapping, map[string][]string{})
+	userConfig.SetDefault(configKeyInvertFaders, false)
 	userConfig.SetDefault(configKeyCOMPort, defaultCOMPort)
 	userConfig.SetDefault(configKeyBaudRate, defaultBaudRate)
+	userConfig.SetDefault(configKeyNumPhysFaders, 4)
 
 	internalConfig := viper.New()
 	internalConfig.SetConfigName(internalConfigName)
@@ -144,9 +148,9 @@ func (cc *CanonicalConfig) Load() error {
 
 	cc.logger.Info("Loaded config successfully")
 	cc.logger.Infow("Config values",
-		"sliderMapping", cc.SliderMapping,
+		"faderMapping", cc.faderMapping,
 		"connectionInfo", cc.ConnectionInfo,
-		"invertSliders", cc.InvertSliders)
+		"invertFaders", cc.InvertFaders)
 
 	return nil
 }
@@ -171,7 +175,7 @@ func (cc *CanonicalConfig) WatchConfigFileChanges() {
 
 	lastAttemptedReload := time.Now()
 
-	// establish watch using viper as opposed to doing it ourselves, though our internal cooldown is still required
+	// establish watch using viper as opposed to doing it ourselves, though our internal cool-down is still required
 	cc.userConfig.WatchConfig()
 	cc.userConfig.OnConfigChange(func(event fsnotify.Event) {
 
@@ -217,10 +221,10 @@ func (cc *CanonicalConfig) StopWatchingConfigFile() {
 
 func (cc *CanonicalConfig) populateFromVipers() error {
 
-	// merge the slider mappings from the user and internal configs
-	cc.SliderMapping = sliderMapFromConfigs(
-		cc.userConfig.GetStringMapStringSlice(configKeySliderMapping),
-		cc.internalConfig.GetStringMapStringSlice(configKeySliderMapping),
+	// merge the fader mappings from the user and internal configs
+	cc.faderMapping = faderMapFromConfigs(
+		cc.userConfig.GetStringMapStringSlice(configKeyFaderMapping),
+		cc.internalConfig.GetStringMapStringSlice(configKeyFaderMapping),
 	)
 
 	// get the rest of the config fields - viper saves us a lot of effort here
@@ -236,8 +240,9 @@ func (cc *CanonicalConfig) populateFromVipers() error {
 		cc.ConnectionInfo.BaudRate = defaultBaudRate
 	}
 
-	cc.InvertSliders = cc.userConfig.GetBool(configKeyInvertSliders)
+	cc.InvertFaders = cc.userConfig.GetBool(configKeyInvertFaders)
 	cc.NoiseReductionLevel = cc.userConfig.GetString(configKeyNoiseReductionLevel)
+	cc.NumPhysFaders = cc.userConfig.GetInt(configKeyNumPhysFaders)
 
 	cc.logger.Debug("Populated config fields from vipers")
 

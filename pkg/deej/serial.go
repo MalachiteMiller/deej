@@ -29,19 +29,20 @@ type SerialIO struct {
 	connOptions serial.OpenOptions
 	conn        io.ReadWriteCloser
 
-	lastKnownNumSliders        int
-	currentSliderPercentValues []float32
+	lastKnownNumFaders        int
+	currentFaderPercentValues []float32
+	page                      int
 
-	sliderMoveConsumers []chan SliderMoveEvent
+	faderMoveConsumers []chan faderMoveEvent
 }
 
-// SliderMoveEvent represents a single slider move captured by deej
-type SliderMoveEvent struct {
-	SliderID     int
+// faderMoveEvent represents a single fader move captured by deej
+type faderMoveEvent struct {
+	faderID      int
 	PercentValue float32
 }
 
-var expectedLinePattern = regexp.MustCompile(`^\d{1,4}(\|\d{1,4})*\r\n$`)
+var expectedLinePattern = regexp.MustCompile(`^(\$\d\.\d{1,4}\.\d%)|(#\d%)$`)
 
 // NewSerialIO creates a SerialIO instance that uses the provided deej
 // instance's connection info to establish communications with the arduino chip
@@ -49,12 +50,13 @@ func NewSerialIO(deej *Deej, logger *zap.SugaredLogger) (*SerialIO, error) {
 	logger = logger.Named("serial")
 
 	sio := &SerialIO{
-		deej:                deej,
-		logger:              logger,
-		stopChannel:         make(chan bool),
-		connected:           false,
-		conn:                nil,
-		sliderMoveConsumers: []chan SliderMoveEvent{},
+		deej:               deej,
+		logger:             logger,
+		stopChannel:        make(chan bool),
+		connected:          false,
+		conn:               nil,
+		page:               0,
+		faderMoveConsumers: []chan faderMoveEvent{},
 	}
 
 	logger.Debug("Created serial i/o instance")
@@ -75,7 +77,7 @@ func (sio *SerialIO) Start() error {
 	}
 
 	// set minimum read size according to platform (0 for windows, 1 for linux)
-	// this prevents a rare bug on windows where serial reads get congested,
+	// this prevents a rare bug on Windows where serial reads get congested,
 	// resulting in significant lag
 	minimumReadSize := 0
 	if util.Linux() {
@@ -137,11 +139,11 @@ func (sio *SerialIO) Stop() {
 	}
 }
 
-// SubscribeToSliderMoveEvents returns an unbuffered channel that receives
-// a sliderMoveEvent struct every time a slider moves
-func (sio *SerialIO) SubscribeToSliderMoveEvents() chan SliderMoveEvent {
-	ch := make(chan SliderMoveEvent)
-	sio.sliderMoveConsumers = append(sio.sliderMoveConsumers, ch)
+// SubscribeToFaderMoveEvents returns an unbuffered channel that receives
+// a faderMoveEvent struct every time a fader moves
+func (sio *SerialIO) SubscribeToFaderMoveEvents() chan faderMoveEvent {
+	ch := make(chan faderMoveEvent)
+	sio.faderMoveConsumers = append(sio.faderMoveConsumers, ch)
 
 	return ch
 }
@@ -156,14 +158,14 @@ func (sio *SerialIO) setupOnConfigReload() {
 			select {
 			case <-configReloadedChannel:
 
-				// make any config reload unset our slider number to ensure process volumes are being re-set
-				// (the next read line will emit SliderMoveEvent instances for all sliders)\
+				// make any config reload unset our fader number to ensure process volumes are being re-set
+				// (the next read line will emit faderMoveEvent instances for all faders)\
 				// this needs to happen after a small delay, because the session map will also re-acquire sessions
 				// whenever the config file is reloaded, and we don't want it to receive these move events while the map
 				// is still cleared. this is kind of ugly, but shouldn't cause any issues
 				go func() {
 					<-time.After(stopDelay)
-					sio.lastKnownNumSliders = 0
+					sio.lastKnownNumFaders = 0
 				}()
 
 				// if connection params have changed, attempt to stop and start the connection
@@ -203,7 +205,7 @@ func (sio *SerialIO) readLine(logger *zap.SugaredLogger, reader *bufio.Reader) c
 
 	go func() {
 		for {
-			line, err := reader.ReadString('\n')
+			line, err := reader.ReadString('%')
 			if err != nil {
 
 				if sio.deej.Verbose() {
@@ -226,82 +228,74 @@ func (sio *SerialIO) readLine(logger *zap.SugaredLogger, reader *bufio.Reader) c
 	return ch
 }
 
+func (sio *SerialIO) changePage(direction bool) {
+	// TODO: limit page up
+	if direction {
+		sio.page++
+	} else {
+		if sio.page > 0 {
+			sio.page--
+		}
+	}
+	return
+}
+
 func (sio *SerialIO) handleLine(logger *zap.SugaredLogger, line string) {
 
-	// this function receives an unsanitized line which is guaranteed to end with LF,
+	// this function receives an un-sanitized line which is guaranteed to end with LF,
 	// but most lines will end with CRLF. it may also have garbage instead of
 	// deej-formatted values, so we must check for that! just ignore bad ones
 	if !expectedLinePattern.MatchString(line) {
 		return
 	}
 
-	// trim the suffix
-	line = strings.TrimSuffix(line, "\r\n")
+	// handle page changes
+	if line[0] == '#' {
+		direction, _ := strconv.ParseBool(string(line[1]))
+		sio.changePage(direction)
+	} else {
+		// split on pipe (|), this gives a slice of numerical strings between "0" and "1023"
+		rawData := line[1 : len(line)-1]
+		splitData := strings.Split(rawData, ".")
+		faderId, _ := strconv.Atoi(splitData[0])
+		faderValue, _ := strconv.Atoi(splitData[1])
+		faderMute, _ := strconv.ParseBool(splitData[2])
 
-	// split on pipe (|), this gives a slice of numerical strings between "0" and "1023"
-	splitLine := strings.Split(line, "|")
-	numSliders := len(splitLine)
+		// adjust targeted channel by page
+		faderId += sio.page * sio.deej.config.NumPhysFaders
 
-	// update our slider count, if needed - this will send slider move events for all
-	if numSliders != sio.lastKnownNumSliders {
-		logger.Infow("Detected sliders", "amount", numSliders)
-		sio.lastKnownNumSliders = numSliders
-		sio.currentSliderPercentValues = make([]float32, numSliders)
-
-		// reset everything to be an impossible value to force the slider move event later
-		for idx := range sio.currentSliderPercentValues {
-			sio.currentSliderPercentValues[idx] = -1.0
-		}
-	}
-
-	// for each slider:
-	moveEvents := []SliderMoveEvent{}
-	for sliderIdx, stringValue := range splitLine {
-
-		// convert string values to integers ("1023" -> 1023)
-		number, _ := strconv.Atoi(stringValue)
-
-		// turns out the first line could come out dirty sometimes (i.e. "4558|925|41|643|220")
-		// so let's check the first number for correctness just in case
-		if sliderIdx == 0 && number > 1023 {
-			sio.logger.Debugw("Got malformed line from serial, ignoring", "line", line)
-			return
-		}
+		// for each fader:
+		moveEvent := faderMoveEvent{}
 
 		// map the value from raw to a "dirty" float between 0 and 1 (e.g. 0.15451...)
-		dirtyFloat := float32(number) / 1023.0
+		dirtyFloat := float32(faderValue) / 1023.0
 
 		// normalize it to an actual volume scalar between 0.0 and 1.0 with 2 points of precision
 		normalizedScalar := util.NormalizeScalar(dirtyFloat)
 
-		// if sliders are inverted, take the complement of 1.0
-		if sio.deej.config.InvertSliders {
+		// if faders are inverted, take the complement of 1.0
+		if sio.deej.config.InvertFaders {
 			normalizedScalar = 1 - normalizedScalar
 		}
 
-		// check if it changes the desired state (could just be a jumpy raw slider value)
-		if util.SignificantlyDifferent(sio.currentSliderPercentValues[sliderIdx], normalizedScalar, sio.deej.config.NoiseReductionLevel) {
-
-			// if it does, update the saved value and create a move event
-			sio.currentSliderPercentValues[sliderIdx] = normalizedScalar
-
-			moveEvents = append(moveEvents, SliderMoveEvent{
-				SliderID:     sliderIdx,
-				PercentValue: normalizedScalar,
-			})
-
-			if sio.deej.Verbose() {
-				logger.Debugw("Slider moved", "event", moveEvents[len(moveEvents)-1])
-			}
+		// if mute button pressed, mute
+		if faderMute {
+			normalizedScalar = 0
 		}
+
+		sio.currentFaderPercentValues[faderId] = normalizedScalar
+
+		moveEvent = faderMoveEvent{
+			faderID:      faderId,
+			PercentValue: normalizedScalar,
+		}
+
+		if sio.deej.Verbose() {
+			logger.Debugw("fader moved", "event", moveEvent)
+		}
+
+		// deliver move events if there are any, towards all potential consumers
+		sio.faderMoveConsumers[faderId] <- moveEvent
 	}
 
-	// deliver move events if there are any, towards all potential consumers
-	if len(moveEvents) > 0 {
-		for _, consumer := range sio.sliderMoveConsumers {
-			for _, moveEvent := range moveEvents {
-				consumer <- moveEvent
-			}
-		}
-	}
 }
